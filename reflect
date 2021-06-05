@@ -1,0 +1,239 @@
+@Slf4j
+@Aspect
+@Component
+public class SensitiveHandleAspect {
+
+    /**
+     * decrypt
+     */
+    @Resource
+    private KmsProxy kmsProxy;
+
+    /**
+     * encrypt
+     */
+    @Resource
+    private TokenAccessProxy tokenProxy;
+
+    /**
+     * opLog字段
+     */
+    private static final String VALUE_MOBILE = "value_mobile";
+
+    /**
+     * opLog字段
+     */
+    private static final String VALUE_ID_CARD = "value_idCard";
+
+    /**
+     * opLog字段
+     */
+    private static final String VALUE = "value";
+
+    /**
+     * 添加了注解的方法
+     */
+    @Pointcut("@annotation(com.annotation)")
+    public void pointcut() {
+    }
+
+    @Around("pointcut()")
+    public Object around(final ProceedingJoinPoint jp) throws Throwable {
+
+        MethodSignature methodSignature = (MethodSignature) jp.getSignature();
+        Method method = methodSignature.getMethod();
+
+        Object[] args = jp.getArgs();
+
+        log.info("::::::::::::::进入了切点方法::::::::::::::，当前切点类：{}，方法名：{}", method.getDeclaringClass().getName(), method.getName());
+
+        SensitiveHandler annotationSh = AnnotationUtils.findAnnotation(method, SensitiveHandler.class);
+        if (annotationSh == null) {
+            log.error("what is up ,why null i do not know!!!");
+            return jp.proceed();
+        }
+        //处理类型
+        String handleType = annotationSh.handleType();
+
+        //获取枚举的待处理字段、转换为密文+token、给参数设置密文&token字段
+        String[] fields = annotationSh.fields();
+        if (arrayEmpty(fields)) {
+            throw new SensitiveHandleException("注解【SensitiveHandleAspect】待处理字段未设置");
+        }
+
+        List<String> fieldsList = Arrays.asList(fields);
+        for (String field : fieldsList) {
+            //获取字段处理的枚举
+            SensitiveArgsEnum argsEnum = SensitiveArgsEnum.getByBeanField(field);
+
+            //获取字段的值
+            String argValue = getArgValue(args, fieldTransSupport(field));
+
+            if (TokenAccessConstant.HANDLE_EN.equals(handleType)) {//加密
+
+                //加密操作
+                TokenAccessDto dto = encryptData(argValue, argsEnum).entrySet().stream().findFirst().get().getValue();
+                //为对象属性赋值
+                setSensitiveField4En(args, dto, argsEnum);
+            } else if (TokenAccessConstant.HANDLE_DE.equals(handleType)) {//解密
+
+                //转换为明文
+                String value = decryptData(argValue, argsEnum);
+                //设置明文字段
+                setSensitiveField4De(args, value, argsEnum);
+            } else {//报错提示
+                throw new SensitiveHandleException("注解【SensitiveHandleAspect】非法处理类型：" + handleType + "，可选为 en、de");
+            }
+        }
+
+        return jp.proceed();
+    }
+
+    /**
+     * 判断数组是否为空
+     */
+    private Boolean arrayEmpty(Object[] s) {
+        return s == null || s.length < 1;
+    }
+
+    /**
+     * 获取加密属性字段的值
+     */
+    private String getArgValue(Object[] args, String field) {
+        if (arrayEmpty(args)) {
+            return null;
+        }
+        Iterator<Object> iterator = Arrays.stream(args).iterator();
+        while (iterator.hasNext()) {
+            Object next = iterator.next();
+            if (next instanceof SensitiveSuperBean) {
+                Class<?> argBean = next.getClass();
+                try {
+                    Field declaredField = argBean.getDeclaredField(field);
+                    declaredField.setAccessible(true);
+                    return (String) declaredField.get(next);
+                } catch (Exception e) {
+                    log.error("获取加密属性字段的值方法报错：{}", e.getMessage());
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 为对象的加密属性赋值
+     */
+    private void setSensitiveField4En(Object[] args, TokenAccessDto dto, SensitiveArgsEnum argsEnum) throws Exception {
+        if (arrayEmpty(args)) {
+            log.error("为对象的加密属性赋值 入参args为null");
+            return;
+        }
+        Iterator<Object> iterator = Arrays.stream(args).iterator();
+        while (iterator.hasNext()) {
+            Object next = iterator.next();
+            if (next instanceof SensitiveSuperBean) {
+                Class<?> argBean = next.getClass();
+                if (SensitiveArgsEnum.mobile.equals(argsEnum)) {
+                    Field encryptedMobile = argBean.getDeclaredField("encryptedMobile");
+                    encryptedMobile.setAccessible(true);
+                    encryptedMobile.set(next, dto.getEncryptedStr());
+                    Field mobileToken = argBean.getDeclaredField("mobileToken");
+                    mobileToken.setAccessible(true);
+                    mobileToken.set(next, dto.getToken());
+                } else if (SensitiveArgsEnum.idCard.equals(argsEnum)) {
+                    Field encryptedIdCard = argBean.getDeclaredField("encryptedIdCard");
+                    encryptedIdCard.setAccessible(true);
+                    encryptedIdCard.set(next, dto.getEncryptedStr());
+                    Field idCardToken = argBean.getDeclaredField("idCardToken");
+                    idCardToken.setAccessible(true);
+                    idCardToken.set(next, dto.getToken());
+                } else {
+                    log.error("不支持的字段加密属性");
+                }
+            }
+        }
+    }
+
+    /**
+     * 为对象的解密属性赋值
+     */
+    private void setSensitiveField4De(Object[] args, String str, SensitiveArgsEnum argsEnum) throws Exception {
+        if (arrayEmpty(args)) {
+            log.error("为对象的解密属性赋值 入参args为null");
+            return;
+        }
+        Iterator<Object> iterator = Arrays.stream(args).iterator();
+        while (iterator.hasNext()) {
+            Object next = iterator.next();
+            if (next instanceof SensitiveSuperBean) {
+                Class<?> argBean = next.getClass();
+                if (SensitiveArgsEnum.mobile.equals(argsEnum)) {
+                    Field mobile = argBean.getDeclaredField("mobile");
+                    mobile.setAccessible(true);
+                    mobile.set(next, str);
+                } else if (SensitiveArgsEnum.idCard.equals(argsEnum)) {
+                    Field idCard = argBean.getDeclaredField("idCard");
+                    idCard.setAccessible(true);
+                    idCard.set(next, str);
+                } else {
+                    log.error("不支持的字段解密属性");
+                }
+            }
+        }
+    }
+
+    /**
+     * 加密操作
+     */
+    private Map<String, TokenAccessDto> encryptData(String data, SensitiveArgsEnum argsEnum) throws SensitiveHandleException {
+        HashMap<String, TokenAccessDto> map = Maps.newHashMap();
+        if (StringUtil.isEmpty(data)) {
+            //说明敏感字段是空的 直接返回相应的空字段
+            map.put("", new TokenAccessDto("", ""));
+            return map;
+        }
+        RpcResponse<Map<String, TokenAccessDto>> response = tokenProxy.getEncryptedDataSupportBatch(argsEnum, Arrays.asList(data));
+        if (response == null) {
+            log.error("调用token化服务出参结果rpcResponse为null");
+            throw new SensitiveHandleException("调用token化服务出参结果rpcResponse为null");
+        }
+        Map<String, TokenAccessDto> rpcMap = response.getData();
+        if (rpcMap == null || rpcMap.size() < 1) {
+            log.error("调用token化服务出参结果rpcResponse为空");
+            throw new SensitiveHandleException("调用token化服务出参结果rpcResponse为空");
+        }
+        map.putAll(rpcMap);
+        return map;
+    }
+
+    /**
+     * 解密操作
+     */
+    private String decryptData(String data, SensitiveArgsEnum argsEnum) throws SensitiveHandleException {
+        if (StringUtil.isBlank(data)) {//密文是空的 明文也为空
+            return "";
+        }
+        RpcResponse<String> response = kmsProxy.kmsDecrypt(argsEnum, data);
+        if (response == null) {
+            log.error("调用kms服务出参结果rpcResponse为null");
+            throw new SensitiveHandleException("调用kms服务出参结果rpcResponse为null");
+        }
+        String str = response.getData();
+        if (!response.isSuccess() || StringUtil.isBlank(str)) {
+            log.error("调用kms服务出参结果rpcResponse为空");
+            throw new SensitiveHandleException("调用kms服务出参结果rpcResponse为空");
+        }
+        return str;
+    }
+
+    /**
+     * opLog加密字段特殊处理
+     */
+    private static String fieldTransSupport(String field) {
+        if (VALUE_MOBILE.equals(field) || VALUE_ID_CARD.equals(field)) return VALUE;
+        return field;
+    }
+
+
+}
